@@ -23,6 +23,8 @@ backend:
     ip: "192.168.1.50"          # Required: DLNA device IP
     port: 1400                  # DLNA device port
     fixed_volume: false         # Ignore volume commands
+    gapless: true               # Pre-load the next track; set false if the
+                                # renderer jumps to it early (e.g. FiiO K17)
     proxy_port: 7120            # Audio proxy port for DLNA streaming
     # description_url: ""       # UPnP description XML URL (auto-discovered via SSDP)
   # local:

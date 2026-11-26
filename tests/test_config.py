@@ -215,6 +215,19 @@ class TestSpeakerConfigToDict:
         assert d["dlna_port"] == 1400
         assert d["dlna_fixed_volume"] is False
 
+    def test_dlna_speaker_persists_gapless(self) -> None:
+        assert speaker_config_to_dict(self._make_dlna_speaker())["dlna_gapless"] is True
+        off = self._make_dlna_speaker(dlna_gapless=False)
+        assert speaker_config_to_dict(off)["dlna_gapless"] is False
+
+    def test_local_speaker_omits_gapless(self) -> None:
+        assert "dlna_gapless" not in speaker_config_to_dict(self._make_local_speaker())
+
+    def test_flat_yaml_gapless(self) -> None:
+        assert dict_to_config({}).backend.dlna.gapless is True
+        config = dict_to_config({"backend": {"dlna": {"gapless": False}}})
+        assert config.backend.dlna.gapless is False
+
     def test_dlna_speaker_persists_uuid_and_omits_ports(self) -> None:
         sc = self._make_dlna_speaker()
         d = speaker_config_to_dict(sc)

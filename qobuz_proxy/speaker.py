@@ -157,6 +157,7 @@ class Speaker:
             config_dict["dlna_port"] = self._config.dlna_port
             config_dict["description_url"] = self._config.dlna_description_url
             config_dict["fixed_volume"] = self._config.dlna_fixed_volume
+            config_dict["gapless"] = self._config.dlna_gapless
         elif self._config.backend_type == "local":
             config_dict["audio_device"] = self._config.audio_device
             config_dict["buffer_size"] = self._config.audio_buffer_size
@@ -194,6 +195,7 @@ class Speaker:
                     ip=self._config.dlna_ip,
                     port=self._config.dlna_port,
                     fixed_volume=self._config.dlna_fixed_volume,
+                    gapless=self._config.dlna_gapless,
                     proxy_port=self._config.proxy_port,
                     description_url=self._config.dlna_description_url,
                 ),

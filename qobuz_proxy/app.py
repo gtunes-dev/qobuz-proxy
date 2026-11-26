@@ -52,6 +52,7 @@ def _configured_speaker_status(sc: SpeakerConfig, status: str) -> dict:
         config_dict["dlna_port"] = sc.dlna_port
         config_dict["description_url"] = sc.dlna_description_url
         config_dict["fixed_volume"] = sc.dlna_fixed_volume
+        config_dict["gapless"] = sc.dlna_gapless
     elif sc.backend_type == "local":
         config_dict["audio_device"] = sc.audio_device
         config_dict["buffer_size"] = sc.audio_buffer_size
@@ -443,6 +444,7 @@ class QobuzProxy:
             dlna_ip=body.get("dlna_ip", ""),
             dlna_port=int(body.get("dlna_port", 1400)),
             dlna_fixed_volume=bool(body.get("fixed_volume", False)),
+            dlna_gapless=bool(body.get("gapless", True)),
             dlna_description_url=body.get("description_url", ""),
             audio_device=body.get("audio_device", "default"),
             audio_buffer_size=int(body.get("buffer_size", 2048)),
@@ -525,6 +527,7 @@ class QobuzProxy:
             dlna_ip=body.get("dlna_ip", old_config.dlna_ip),
             dlna_port=int(body.get("dlna_port", old_config.dlna_port)),
             dlna_fixed_volume=bool(body.get("fixed_volume", old_config.dlna_fixed_volume)),
+            dlna_gapless=bool(body.get("gapless", old_config.dlna_gapless)),
             dlna_description_url=body.get("description_url", old_config.dlna_description_url),
             proxy_port=old_config.proxy_port,
             audio_device=body.get("audio_device", old_config.audio_device),

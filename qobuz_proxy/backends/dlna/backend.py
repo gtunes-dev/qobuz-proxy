@@ -99,6 +99,7 @@ class DLNABackend(AudioBackend):
         fixed_volume: bool = False,
         name: Optional[str] = None,
         description_url: Optional[str] = None,
+        gapless: bool = True,
     ):
         """
         Initialize DLNA backend.
@@ -109,6 +110,9 @@ class DLNABackend(AudioBackend):
             fixed_volume: If True, ignore volume commands
             name: Display name (auto-detected if not provided)
             description_url: Full URL to UPnP device description XML
+            gapless: If False, never pre-load the next track on the renderer.
+                Some renderers (FiiO K17) start playing a track queued with
+                SetNextAVTransportURI at once instead of after the current one.
         """
         super().__init__(name or f"DLNA ({ip})")
         self._ip = ip
@@ -147,7 +151,7 @@ class DLNABackend(AudioBackend):
         self._next_track_proxy_url: Optional[str] = None
         self._next_track_metadata: Optional[BackendTrackMetadata] = None
         self._next_track_queue_nr: Optional[int] = None  # Sonos queue position of armed track
-        self._gapless_supported: bool = True
+        self._gapless_supported: bool = gapless
         self._current_proxy_url: Optional[str] = None
 
         # Sonos queue-based playback (for Sonos app metadata display)

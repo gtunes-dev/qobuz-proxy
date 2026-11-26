@@ -84,6 +84,13 @@ class TestSingleSpeakerNormalization:
         assert speaker.http_port == 0  # auto-assigned by _assign_ports to avoid web UI conflict
         assert speaker.bind_address == "192.168.1.1"
 
+    def test_flat_dlna_gapless_to_speaker(self):
+        config = Config()
+        assert _single_speaker_from_config(config).dlna_gapless is True
+
+        config.backend.dlna.gapless = False
+        assert _single_speaker_from_config(config).dlna_gapless is False
+
     def test_flat_local_config_to_speaker(self):
         config = Config()
         config.device.name = "Local Speaker"
@@ -151,6 +158,27 @@ class TestYAMLSpeakersParsing:
         raw = [{"name": "Speaker"}]
         speakers = _parse_yaml_speakers(raw, config)
         assert speakers[0].bind_address == "10.0.0.5"
+
+
+class TestGaplessSpeakerParsing:
+    def test_yaml_gapless_defaults_on(self):
+        speakers = _parse_yaml_speakers([{"name": "A", "dlna_ip": "10.0.0.1"}], Config())
+        assert speakers[0].dlna_gapless is True
+
+    def test_yaml_gapless_off(self):
+        raw = [{"name": "A", "dlna_ip": "10.0.0.1", "dlna_gapless": False}]
+        assert _parse_yaml_speakers(raw, Config())[0].dlna_gapless is False
+
+    def test_env_gapless_per_speaker(self, monkeypatch):
+        monkeypatch.setenv("QOBUZPROXY_DEVICE_NAME", "A,B")
+        monkeypatch.setenv("QOBUZPROXY_DLNA_GAPLESS", "false,true")
+        speakers = _parse_env_speakers(Config())
+        assert [s.dlna_gapless for s in speakers] == [False, True]
+
+    def test_env_gapless_defaults_on(self, monkeypatch):
+        monkeypatch.setenv("QOBUZPROXY_DEVICE_NAME", "A,B")
+        monkeypatch.delenv("QOBUZPROXY_DLNA_GAPLESS", raising=False)
+        assert [s.dlna_gapless for s in _parse_env_speakers(Config())] == [True, True]
 
 
 class TestEnvVarSpeakersParsing:

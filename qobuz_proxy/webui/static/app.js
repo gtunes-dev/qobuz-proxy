@@ -288,6 +288,7 @@
             html += '<input type="text" id="edit-dlna-url" value="' + escapeHtml(cfg.description_url || "") + '" placeholder="http://192.168.1.x:1400/xml/device_description.xml">';
             html += '</div>';
             html += '<div class="form-group"><label><input type="checkbox" id="edit-fixed-vol" style="width:auto;display:inline;margin-right:6px;"' + (cfg.fixed_volume ? ' checked' : '') + '> Fixed volume</label></div>';
+            html += '<div class="form-group"><label><input type="checkbox" id="edit-gapless" style="width:auto;display:inline;margin-right:6px;"' + (cfg.gapless === false ? '' : ' checked') + '> Gapless playback <span style="color:#666">(turn off if the next track starts too early)</span></label></div>';
         } else if (s.backend === "local") {
             html += '<div class="form-group">';
             html += '<label>Audio Device (leave blank for default)</label>';
@@ -620,6 +621,7 @@
             html += '<input type="text" id="new-dlna-url" value="' + escapeHtml(defaultUrl) + '" placeholder="Leave empty for auto-discovery">';
             html += '</div>';
             html += '<div class="form-group"><label><input type="checkbox" id="new-fixed-vol" style="width:auto;display:inline;margin-right:6px;"> Fixed volume</label></div>';
+            html += '<div class="form-group"><label><input type="checkbox" id="new-gapless" style="width:auto;display:inline;margin-right:6px;" checked> Gapless playback <span style="color:#666">(turn off if the next track starts too early)</span></label></div>';
         } else if (backend === "local") {
             html += '<div class="form-group">';
             html += '<label>Audio device (leave blank for default)</label>';
@@ -676,6 +678,8 @@
             payload.description_url = urlEl ? urlEl.value.trim() : "";
             var fixedVolEl = document.getElementById("new-fixed-vol");
             payload.fixed_volume = fixedVolEl ? fixedVolEl.checked : false;
+            var gaplessEl = document.getElementById("new-gapless");
+            payload.gapless = gaplessEl ? gaplessEl.checked : true;
         } else if (selectedBackend === "local") {
             var devEl = document.getElementById("new-audio-device");
             payload.audio_device = devEl ? devEl.value.trim() : "";
@@ -758,6 +762,8 @@
             payload.description_url = urlEl ? urlEl.value.trim() : "";
             var fixedVolEl = document.getElementById("edit-fixed-vol");
             if (fixedVolEl) payload.fixed_volume = fixedVolEl.checked;
+            var gaplessEl = document.getElementById("edit-gapless");
+            if (gaplessEl) payload.gapless = gaplessEl.checked;
         } else if (backend === "local") {
             var devEl = document.getElementById("edit-audio-device");
             payload.audio_device = devEl ? devEl.value.trim() : "";

@@ -179,6 +179,14 @@ Environment Variables:
         action="store_true",
         help="Ignore volume commands (for external amp control)",
     )
+    dlna_group.add_argument(
+        "--no-gapless",
+        dest="gapless",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Don't pre-load the next track (for renderers that mishandle SetNextAVTransportURI)",
+    )
 
     # Local Audio Backend
     local_group = parser.add_argument_group("Local Audio Backend")
@@ -256,6 +264,7 @@ def args_to_dict(args: argparse.Namespace) -> dict:
         "dlna_ip": ("backend", "dlna", "ip"),
         "dlna_port": ("backend", "dlna", "port"),
         "fixed_volume": ("backend", "dlna", "fixed_volume"),
+        "gapless": ("backend", "dlna", "gapless"),
         "audio_device": ("backend", "local", "device"),
         "audio_buffer_size": ("backend", "local", "buffer_size"),
         "backend_type": ("backend", "type"),
@@ -286,6 +295,8 @@ def log_config(config: Config) -> None:
             logger.info(f"  DLNA target: {sc.dlna_ip}:{sc.dlna_port}")
             if sc.dlna_fixed_volume:
                 logger.info("  Volume control: disabled (fixed_volume=true)")
+            if not sc.dlna_gapless:
+                logger.info("  Gapless: disabled (gapless=false)")
             logger.info(f"  Proxy server: {sc.bind_address}:{sc.proxy_port}")
         elif sc.backend_type == "local":
             logger.info(f"  Audio device: {sc.audio_device}")

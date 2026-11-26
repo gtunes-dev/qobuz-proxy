@@ -108,6 +108,34 @@ class TestQualityDetectionConfirmed:
         assert backend.quality_detection_confirmed is False
 
 
+class TestGaplessDisabled:
+    """Some renderers start playing the next track as soon as it is queued
+    (FiiO K17), so gapless can be switched off per speaker."""
+
+    def test_gapless_enabled_by_default(self) -> None:
+        assert DLNABackend("10.0.0.5").supports_gapless is True
+
+    def test_gapless_disabled_by_config(self) -> None:
+        assert DLNABackend("10.0.0.5", gapless=False).supports_gapless is False
+
+    async def test_set_next_track_sends_nothing_when_disabled(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        backend = DLNABackend("10.0.0.5", gapless=False)
+        backend._current_proxy_url = "http://proxy/audio/current.flac"
+        client = MagicMock()
+        client.set_next_av_transport_uri = AsyncMock()
+        client.add_uri_to_queue = AsyncMock()
+        client.get_media_info = AsyncMock(return_value=backend._current_proxy_url)
+        backend._client = client
+
+        armed = await backend.set_next_track("http://cdn/next.flac", _make_metadata(), 2)
+
+        assert armed is False
+        client.set_next_av_transport_uri.assert_not_called()
+        client.add_uri_to_queue.assert_not_called()
+
+
 class TestSonosGaplessQueue:
     """Sonos gapless arming appends to the device queue — duplicates replay the song."""
 

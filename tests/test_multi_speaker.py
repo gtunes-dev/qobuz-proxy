@@ -917,6 +917,40 @@ class TestSpeakerEditCallbacks:
             await app._on_edit_speaker("moode", {"fixed_volume": False})
             assert config.speakers[0].dlna_fixed_volume is False
 
+    async def test_edit_toggles_gapless(self):
+        """Gapless is on by default, can be switched off, and survives edits
+        that don't mention it."""
+        config = _make_config(_make_speaker_config(name="K17"))
+        old_speaker = MagicMock()
+        old_speaker.name = "K17"
+        old_speaker.stop = AsyncMock()
+
+        app = QobuzProxy(config)
+        app._api_client = MagicMock()
+        app._speakers = [old_speaker]
+
+        new_speaker = MagicMock()
+        new_speaker.name = "K17"
+        new_speaker.start = AsyncMock(return_value=True)
+        new_speaker.stop = AsyncMock()
+        new_speaker.get_status.return_value = {"id": "k17", "status": "idle"}
+
+        with (
+            patch("qobuz_proxy.app.Speaker", return_value=new_speaker) as mock_speaker_cls,
+            patch.object(app, "_save_config"),
+        ):
+            assert config.speakers[0].dlna_gapless is True
+
+            await app._on_edit_speaker("k17", {"gapless": False})
+            assert config.speakers[0].dlna_gapless is False
+            assert mock_speaker_cls.call_args.kwargs["config"].dlna_gapless is False
+
+            await app._on_edit_speaker("k17", {"max_quality": 6})
+            assert config.speakers[0].dlna_gapless is False
+
+            await app._on_edit_speaker("k17", {"gapless": True})
+            assert config.speakers[0].dlna_gapless is True
+
     async def test_edit_sets_device_type(self):
         """The edit form's device type must round-trip and survive edits that omit it."""
         import pytest

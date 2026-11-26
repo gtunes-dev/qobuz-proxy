@@ -161,6 +161,21 @@ class TestBackendFactory:
             await BackendFactory.create_dlna(ip="192.168.1.100")
 
 
+class TestBackendFactoryGapless:
+    async def test_create_from_config_passes_gapless(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        config = Config()
+        config.backend.dlna.ip = "10.0.0.5"
+        config.backend.dlna.description_url = "http://10.0.0.5:49494/description.xml"
+        config.backend.dlna.gapless = False
+
+        with patch.object(BackendFactory, "create_dlna", new=AsyncMock()) as create_dlna:
+            await BackendFactory.create_from_config(config)
+
+        assert create_dlna.call_args.kwargs["gapless"] is False
+
+
 class TestAudioBackendInterface:
     """Tests verifying AudioBackend interface completeness."""
 

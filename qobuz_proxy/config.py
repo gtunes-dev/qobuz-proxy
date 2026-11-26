@@ -71,6 +71,7 @@ ENV_MAPPINGS = {
     "QOBUZPROXY_DLNA_IP": ("backend", "dlna", "ip"),
     "QOBUZPROXY_DLNA_PORT": ("backend", "dlna", "port"),
     "QOBUZPROXY_DLNA_FIXED_VOLUME": ("backend", "dlna", "fixed_volume"),
+    "QOBUZPROXY_DLNA_GAPLESS": ("backend", "dlna", "gapless"),
     # Backend type
     "QOBUZPROXY_BACKEND": ("backend", "type"),
     # Local audio
@@ -120,6 +121,9 @@ class DLNAConfig:
     ip: str = ""
     port: int = 1400
     fixed_volume: bool = False
+    # Pre-load the next track with SetNextAVTransportURI. Turn off for renderers
+    # that start playing the queued track at once (e.g. FiiO K17).
+    gapless: bool = True
     proxy_port: int = 7120
     description_url: str = ""  # Full URL to UPnP device description XML (auto-discovered via SSDP)
 
@@ -170,6 +174,7 @@ class SpeakerConfig:
     dlna_ip: str = ""
     dlna_port: int = 1400
     dlna_fixed_volume: bool = False
+    dlna_gapless: bool = True
     dlna_description_url: str = ""
     proxy_port: int = 0  # 0 = auto-assign
     audio_device: str = "default"
@@ -296,6 +301,7 @@ def speaker_config_to_dict(sc: SpeakerConfig) -> dict:
         d["dlna_ip"] = sc.dlna_ip
         d["dlna_port"] = sc.dlna_port
         d["dlna_fixed_volume"] = sc.dlna_fixed_volume
+        d["dlna_gapless"] = sc.dlna_gapless
         if sc.dlna_description_url:
             d["dlna_description_url"] = sc.dlna_description_url
     elif sc.backend_type == "local":
@@ -317,6 +323,7 @@ def _single_speaker_from_config(config: Config) -> SpeakerConfig:
         dlna_ip=config.backend.dlna.ip,
         dlna_port=config.backend.dlna.port,
         dlna_fixed_volume=config.backend.dlna.fixed_volume,
+        dlna_gapless=config.backend.dlna.gapless,
         dlna_description_url=config.backend.dlna.description_url,
         proxy_port=config.backend.dlna.proxy_port,
         audio_device=config.backend.local.device,
@@ -423,6 +430,7 @@ def _parse_yaml_speakers(raw_speakers: list[dict], config: Config) -> list[Speak
             dlna_ip=raw.get("dlna_ip", ""),
             dlna_port=int(raw.get("dlna_port", 1400)),
             dlna_fixed_volume=bool(raw.get("dlna_fixed_volume", False)),
+            dlna_gapless=bool(raw.get("dlna_gapless", True)),
             dlna_description_url=raw.get("dlna_description_url", ""),
             proxy_port=int(raw.get("proxy_port", 0)),
             audio_device=raw.get("audio_device", "default"),
@@ -470,6 +478,7 @@ def _parse_env_speakers(config: Config) -> list[SpeakerConfig]:
     dlna_ips = _split_env_padded("QOBUZPROXY_DLNA_IP", count, "")
     dlna_ports_raw = _split_env_padded("QOBUZPROXY_DLNA_PORT", count, "1400")
     dlna_fixed_volumes_raw = _split_env_padded("QOBUZPROXY_DLNA_FIXED_VOLUME", count, "false")
+    dlna_gapless_raw = _split_env_padded("QOBUZPROXY_DLNA_GAPLESS", count, "true")
     http_ports_raw = _split_env_padded("QOBUZPROXY_HTTP_PORT", count, "0")
     proxy_ports_raw = _split_env_padded("QOBUZPROXY_PROXY_PORT", count, "0")
     audio_devices = _split_env_padded("QOBUZPROXY_AUDIO_DEVICE", count, "default")
@@ -488,6 +497,7 @@ def _parse_env_speakers(config: Config) -> list[SpeakerConfig]:
             dlna_ip=dlna_ips[i],
             dlna_port=int(dlna_ports_raw[i]),
             dlna_fixed_volume=dlna_fixed_volumes_raw[i].lower() in ("true", "1", "yes", "on"),
+            dlna_gapless=dlna_gapless_raw[i].lower() in ("true", "1", "yes", "on"),
             proxy_port=int(proxy_ports_raw[i]),
             audio_device=audio_devices[i],
             audio_buffer_size=int(audio_buffer_sizes_raw[i]),
@@ -602,7 +612,7 @@ def load_env_config() -> dict:
                     logger.warning(f"Invalid integer for {env_var}: {value}")
                     continue
             # Convert boolean values
-            elif env_var == "QOBUZPROXY_DLNA_FIXED_VOLUME":
+            elif env_var in ("QOBUZPROXY_DLNA_FIXED_VOLUME", "QOBUZPROXY_DLNA_GAPLESS"):
                 value = value.lower() in ("true", "1", "yes", "on")
 
             # Set nested value
@@ -677,6 +687,7 @@ def dict_to_config(d: dict) -> Config:
             config.backend.dlna.fixed_volume = dlna.get(
                 "fixed_volume", config.backend.dlna.fixed_volume
             )
+            config.backend.dlna.gapless = dlna.get("gapless", config.backend.dlna.gapless)
             config.backend.dlna.proxy_port = dlna.get("proxy_port", config.backend.dlna.proxy_port)
             config.backend.dlna.description_url = dlna.get(
                 "description_url", config.backend.dlna.description_url

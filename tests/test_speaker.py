@@ -95,6 +95,15 @@ class TestSpeakerConstruction:
         assert comp.backend.dlna.fixed_volume is True
         assert comp.backend.dlna.proxy_port == 7120
 
+    def test_build_component_config_maps_gapless(self):
+        on = Speaker(config=_make_speaker_config(), api_client=_make_api_client(), app_id="id")
+        assert on._build_component_config().backend.dlna.gapless is True
+
+        off_config = _make_speaker_config(dlna_gapless=False)
+        off = Speaker(config=off_config, api_client=_make_api_client(), app_id="id")
+        assert off._build_component_config().backend.dlna.gapless is False
+        assert off.get_status()["config"]["gapless"] is False
+
     def test_build_component_config_maps_backend_local(self):
         config = _make_speaker_config(
             backend_type="local",
