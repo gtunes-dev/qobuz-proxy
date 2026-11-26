@@ -29,6 +29,19 @@ READ_TIMEOUT_SECONDS = 30
 # Mid-stream reconnect settings: how many times to reconnect (with a Range resume)
 # before giving up, and how long to back off between attempts.
 MAX_UPSTREAM_RETRIES = 3
+# Before any audio has been sent the renderer is still waiting for an answer
+# to its request (and its controller for an answer to SetAVTransportURI), so
+# fail quickly: one retry, not three.
+MAX_UPSTREAM_RETRIES_BEFORE_AUDIO = 1
+# Response headers promise the renderer a file of a given length, so they are
+# only sent once this much of it is in hand (or the upstream body has ended).
+# A CDN that answers with headers and then nothing becomes a clean 502, not a
+# stream the renderer waits on.
+MIN_COMMIT_BYTES = 16 * 1024
+# After a track could not be served at all, further requests for it are refused
+# at once for this long. A renderer that keeps asking must not start a fresh
+# round of upstream retries each time.
+FAILED_TRACK_REFUSE_SECONDS = 30.0
 UPSTREAM_RETRY_DELAY_SECONDS = 0.5
 
 
@@ -64,6 +77,8 @@ class RegisteredTrack:
     qobuz_url: str
     content_type: str
     url_fetched_at: float = field(default_factory=time.time)
+    # Monotonic time until which requests are refused (see FAILED_TRACK_REFUSE_SECONDS).
+    refuse_until: float = 0.0
 
     def is_url_expired(self, max_age: float = DEFAULT_URL_MAX_AGE_SECONDS) -> bool:
         """Check if the URL has expired or is about to expire."""
@@ -228,6 +243,9 @@ class AudioProxyServer:
                 logger.error(f"Delivery complete callback error: {e}")
 
     def _report_delivery_failure(self, proxy_key: str, before_audio: bool) -> None:
+        track = self._tracks.get(proxy_key)
+        if before_audio and track is not None:
+            track.refuse_until = time.monotonic() + FAILED_TRACK_REFUSE_SECONDS
         if self._on_delivery_failure:
             try:
                 self._on_delivery_failure(proxy_key, before_audio)
@@ -262,6 +280,10 @@ class AudioProxyServer:
         if not track:
             logger.warning(f"Unknown track requested: {proxy_key}")
             return web.Response(status=404, text="Track not found")
+
+        if request.method != "HEAD" and track.refuse_until > time.monotonic():
+            logger.debug(f"Refusing track {track.track_id}: it could not be served just now")
+            return web.Response(status=503, text="Track could not be served")
 
         # Check if URL needs refresh. force=True bypasses the metadata cache:
         # its TTL is longer than the proxy's max age, so a plain fetch inside
@@ -342,6 +364,10 @@ class AudioProxyServer:
         is_range = range_header is not None
         stream_start = time.monotonic()
         bytes_sent = 0
+        # Audio read from upstream but held back until MIN_COMMIT_BYTES is in hand.
+        pending = bytearray()
+        status = 200
+        response_headers: Dict[str, str] = {}
         retries = 0
         expired_url_retry_done = False
 
@@ -402,9 +428,10 @@ class AudioProxyServer:
                             return response
 
                         if response is None:
-                            # First successful connection: send headers to client
+                            # First successful connection: work out the headers.
+                            # They are sent once MIN_COMMIT_BYTES of audio is in hand.
                             status = 206 if upstream_response.status == 206 else 200
-                            response_headers: Dict[str, str] = {
+                            response_headers = {
                                 "Content-Type": track.content_type,
                                 "Accept-Ranges": "bytes",
                             }
@@ -419,19 +446,25 @@ class AudioProxyServer:
                                 content_range = response_headers["Content-Range"]
                             response_status = status
 
-                            logger.debug(
-                                f"Streaming track {track.track_id}, headers: {response_headers}"
-                            )
-                            response = web.StreamResponse(
-                                status=status,
-                                headers=response_headers,
-                            )
-                            await response.prepare(request)
-
                         # Stream chunks to client
                         async for chunk in upstream_response.content.iter_chunked(
                             STREAM_CHUNK_SIZE
                         ):
+                            if response is None:
+                                pending.extend(chunk)
+                                if len(pending) < MIN_COMMIT_BYTES and (
+                                    expected_bytes is None or len(pending) < expected_bytes
+                                ):
+                                    continue
+                                logger.debug(
+                                    f"Streaming track {track.track_id}, headers: {response_headers}"
+                                )
+                                response = web.StreamResponse(
+                                    status=status, headers=response_headers
+                                )
+                                await response.prepare(request)
+                                chunk = bytes(pending)
+                                pending.clear()
                             try:
                                 await response.write(chunk)
                                 bytes_sent += len(chunk)
@@ -446,6 +479,13 @@ class AudioProxyServer:
                                 )
                                 return response
 
+                if response is None:
+                    # The whole body was shorter than MIN_COMMIT_BYTES.
+                    response = web.StreamResponse(status=status, headers=response_headers)
+                    await response.prepare(request)
+                    await response.write(bytes(pending))
+                    bytes_sent += len(pending)
+                    pending.clear()
                 await response.write_eof()
                 self._log_stream_end(
                     track=track,
@@ -466,10 +506,17 @@ class AudioProxyServer:
             except (ClientError, asyncio.TimeoutError) as e:
                 # Upstream-side failure — retry with a Range resume
                 retries += 1
-                if retries > MAX_UPSTREAM_RETRIES:
+                # Held-back audio was never sent; the resume refetches it.
+                pending.clear()
+                max_retries = (
+                    MAX_UPSTREAM_RETRIES
+                    if response is not None
+                    else MAX_UPSTREAM_RETRIES_BEFORE_AUDIO
+                )
+                if retries > max_retries:
                     logger.error(
                         f"Upstream failed for track {track.track_id} after "
-                        f"{MAX_UPSTREAM_RETRIES} retries: {type(e).__name__}: {e}"
+                        f"{max_retries} retries: {type(e).__name__}: {e}"
                     )
                     self._report_delivery_failure(proxy_key, response is None)
                     if response is None:
@@ -486,7 +533,7 @@ class AudioProxyServer:
                 logger.warning(
                     f"Upstream connection lost for track {track.track_id} after "
                     f"{bytes_sent} bytes ({type(e).__name__}: {e}); "
-                    f"reconnecting ({retries}/{MAX_UPSTREAM_RETRIES})"
+                    f"reconnecting ({retries}/{max_retries})"
                 )
                 await asyncio.sleep(UPSTREAM_RETRY_DELAY_SECONDS * retries)
                 await self._refresh_track_url(track, force=True)

@@ -352,3 +352,105 @@ async def test_reports_delivery_complete_for_a_whole_file():
         await upstream.stop()
 
     assert delivered == []
+
+
+class OneByteUpstream:
+    """Fake CDN serving a broken file: the right headers, one byte, then it
+    closes the connection (seen on a Qobuz hi-res file)."""
+
+    def __init__(self):
+        self.requests = 0
+        self._runner = None
+
+    async def _handle(self, request: web.Request) -> web.StreamResponse:
+        self.requests += 1
+        resp = web.StreamResponse(
+            status=206,
+            headers={
+                "Content-Length": str(len(PAYLOAD)),
+                "Content-Range": f"bytes 0-{len(PAYLOAD) - 1}/{len(PAYLOAD)}",
+            },
+        )
+        await resp.prepare(request)
+        await resp.write(PAYLOAD[:1])
+        assert request.transport is not None
+        request.transport.close()
+        return resp
+
+    async def start(self) -> str:
+        app = web.Application()
+        app.router.add_get("/file", self._handle)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        port = _free_port()
+        await web.TCPSite(self._runner, "127.0.0.1", port).start()
+        return f"http://127.0.0.1:{port}/file"
+
+    async def stop(self) -> None:
+        if self._runner:
+            await self._runner.cleanup()
+
+
+async def test_broken_file_is_a_clean_error_not_a_stalled_stream():
+    """The renderer must not be promised a file the CDN then fails to send, and
+    must not be able to start a fresh round of upstream retries by asking again."""
+    upstream = OneByteUpstream()
+    upstream_url = await upstream.start()
+
+    provider = MagicMock()
+    provider.get_streaming_url = AsyncMock(return_value=upstream_url)
+
+    port = _free_port()
+    proxy = AudioProxyServer(url_provider=provider, host="127.0.0.1", port=port)
+    failures: list = []
+    proxy.set_delivery_failure_callback(
+        lambda key, before_audio: failures.append((key, before_audio))
+    )
+    await proxy.start()
+    try:
+        proxy.register_track("42", upstream_url, "audio/flac")
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            started = asyncio.get_event_loop().time()
+            async with session.get(
+                f"http://127.0.0.1:{port}/audio/42.flac", headers={"Range": "bytes=0-"}
+            ) as resp:
+                assert resp.status == 502  # not a 206 followed by nothing
+            assert asyncio.get_event_loop().time() - started < 5
+            assert failures == [("42", True)]
+            assert upstream.requests == 2  # the first try and one retry
+
+            # Asking again is refused at once, without going upstream.
+            async with session.get(f"http://127.0.0.1:{port}/audio/42.flac") as resp:
+                assert resp.status == 503
+            assert upstream.requests == 2
+
+            # Playing the track again registers it afresh and may try again.
+            proxy.register_track("42", upstream_url, "audio/flac")
+            async with session.get(f"http://127.0.0.1:{port}/audio/42.flac") as resp:
+                assert resp.status == 502
+            assert upstream.requests == 4
+    finally:
+        await proxy.stop()
+        await upstream.stop()
+
+
+async def test_file_smaller_than_the_commit_threshold_is_served_whole():
+    class Tiny(ExpiredUrlUpstream):
+        async def _handle(self, request: web.Request) -> web.Response:
+            return web.Response(status=200, body=b"tiny", headers={"Content-Length": "4"})
+
+    upstream = Tiny()
+    base_url = await upstream.start()
+    port = _free_port()
+    proxy = AudioProxyServer(url_provider=MagicMock(), host="127.0.0.1", port=port)
+    await proxy.start()
+    try:
+        proxy.register_track("42", base_url, "audio/flac")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/audio/42.flac") as resp:
+                assert resp.status == 200
+                assert await resp.read() == b"tiny"
+    finally:
+        await proxy.stop()
+        await upstream.stop()

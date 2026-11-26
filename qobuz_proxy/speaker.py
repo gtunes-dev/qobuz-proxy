@@ -38,6 +38,7 @@ from qobuz_proxy.playback import (
 )
 from qobuz_proxy.backends import AudioBackend, BackendFactory, BackendNotFoundError, PlaybackState
 from qobuz_proxy.playback.play_reporter import PlayReporter
+from qobuz_proxy.playback.stream_probe import probe_stream
 from qobuz_proxy.playback.state_reporter import PlaybackStateReport, wire_playing_state
 from qobuz_proxy.backends.dlna import AudioProxyServer, DLNABackend, MetadataServiceURLProvider
 
@@ -276,6 +277,8 @@ class Speaker:
             self._metadata_service = MetadataService(
                 api_client=self._api_client,
                 max_quality=self._effective_quality,
+                # A renderer must never be handed a file the CDN cannot serve.
+                stream_probe=probe_stream if isinstance(backend, DLNABackend) else None,
             )
 
             # 5. Create and start audio proxy server (DLNA only)

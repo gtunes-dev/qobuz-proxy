@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from qobuz_proxy.auth.api_client import QobuzAPIClient
+    from qobuz_proxy.playback.stream_probe import StreamProbe
     from qobuz_proxy.backends import BackendTrackMetadata
 
 logger = logging.getLogger(__name__)
@@ -128,16 +129,35 @@ class MetadataService:
     # Kept short so a transient API/network failure is retried soon.
     UNAVAILABLE_RETRY_SECONDS = 30.0
 
-    def __init__(self, api_client: "QobuzAPIClient", max_quality: int = 27):
+    # With a stream probe set, a streaming URL is only handed out once the
+    # start of its file has been read. A (track, quality) that delivered is
+    # trusted for STREAM_VERIFIED_SECONDS, so URL refreshes and the next play
+    # of the track cost nothing; one that did not is avoided for
+    # STREAM_BROKEN_SECONDS and the next lower quality is used instead.
+    STREAM_VERIFIED_SECONDS = 60 * 60.0
+    STREAM_BROKEN_SECONDS = 10 * 60.0
+
+    def __init__(
+        self,
+        api_client: "QobuzAPIClient",
+        max_quality: int = 27,
+        stream_probe: Optional["StreamProbe"] = None,
+    ):
         """
         Initialize metadata service.
 
         Args:
             api_client: Authenticated Qobuz API client
             max_quality: Maximum audio quality to request (5, 6, 7, or 27)
+            stream_probe: Checks that a streaming URL delivers audio. When set,
+                a quality whose file the CDN cannot serve is skipped.
         """
         self._api = api_client
         self._max_quality = max_quality
+        self._stream_probe = stream_probe
+        # (track_id, quality) -> monotonic time until which the verdict holds
+        self._stream_verified_until: dict[tuple[str, int], float] = {}
+        self._stream_broken_until: dict[tuple[str, int], float] = {}
         self._cache = MetadataCache()
         # track_id -> monotonic time until which the track is considered unavailable
         self._unavailable_until: dict[str, float] = {}
@@ -327,6 +347,10 @@ class MetadataService:
 
             for quality in qualities:
                 result = await self._api.get_track_url(metadata.track_id, quality)
+                if result and not await self._stream_delivers(
+                    metadata.track_id, int(result.get("format_id", quality)), result["url"]
+                ):
+                    continue
                 if result:
                     metadata.streaming_url = result["url"]
                     metadata.streaming_url_expires_at = int(time.time()) + self.URL_TTL_SECONDS
@@ -349,6 +373,13 @@ class MetadataService:
                     return
 
             logger.error(f"No streaming URL available for {metadata.track_id}")
+            # Every quality failing points at the network or the CDN, not at
+            # the files: do not hold the verdicts against the track.
+            self._stream_broken_until = {
+                k: until
+                for k, until in self._stream_broken_until.items()
+                if k[0] != metadata.track_id
+            }
             self._clear_streaming_url(metadata)
             self._mark_unavailable(metadata.track_id)
 
@@ -356,6 +387,38 @@ class MetadataService:
             logger.error(f"Failed to fetch URL for {metadata.track_id}: {e}")
             self._clear_streaming_url(metadata)
             self._mark_unavailable(metadata.track_id)
+
+    async def _stream_delivers(self, track_id: str, quality: int, url: str) -> bool:
+        """Whether the CDN serves this track's file at this quality."""
+        if self._stream_probe is None:
+            return True
+        key = (track_id, quality)
+        now = time.monotonic()
+        if self._stream_broken_until.get(key, 0.0) > now:
+            return False
+        if self._stream_verified_until.get(key, 0.0) > now:
+            return True
+        reason = await self._stream_probe(url)
+        if reason is not None:
+            # Once more before giving up on the quality: a single failure can
+            # be the network, and the fallback lasts STREAM_BROKEN_SECONDS.
+            reason = await self._stream_probe(url)
+        now = time.monotonic()
+        if reason is None:
+            self._stream_verified_until = {
+                k: until for k, until in self._stream_verified_until.items() if until > now
+            }
+            self._stream_verified_until[key] = now + self.STREAM_VERIFIED_SECONDS
+            return True
+        self._stream_broken_until = {
+            k: until for k, until in self._stream_broken_until.items() if until > now
+        }
+        self._stream_broken_until[key] = now + self.STREAM_BROKEN_SECONDS
+        logger.warning(
+            f"Track {track_id}: the {AudioQuality.get_name(quality)} file cannot be "
+            f"streamed ({reason}); trying a lower quality"
+        )
+        return False
 
     @staticmethod
     def _clear_streaming_url(metadata: TrackMetadata) -> None:

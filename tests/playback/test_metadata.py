@@ -665,3 +665,72 @@ class TestUnavailableTracks:
 
         assert await metadata_service.get_streaming_url("3") == "https://cdn/3.flac"
         assert not metadata_service.is_unavailable("3")
+
+
+def _url(quality: int) -> dict:
+    return {"url": f"https://cdn.example/{quality}", "format_id": quality}
+
+
+class TestStreamVerification:
+    """With a stream probe, a quality whose file the CDN cannot serve is skipped."""
+
+    META = {"title": "T", "artist": "A", "album": "B", "duration_ms": 1000, "album_art_url": ""}
+
+    def _service(self, mock_api: MockAPIClient, broken: set[str]) -> tuple[MetadataService, list]:
+        probed: list[str] = []
+
+        async def probe(url: str):
+            probed.append(url)
+            return "stream ended after 1 bytes" if url in broken else None
+
+        mock_api.get_track_metadata.return_value = self.META
+        # Qobuz has no 24/192 file for this track: asking for 27 returns 7.
+        mock_api.get_track_url.side_effect = lambda track_id, quality: _url(min(quality, 7))
+        service = MetadataService(mock_api, max_quality=27, stream_probe=probe)  # type: ignore[arg-type]
+        return service, probed
+
+    async def test_broken_quality_falls_back_to_the_next(self, mock_api: MockAPIClient) -> None:
+        service, probed = self._service(mock_api, broken={"https://cdn.example/7"})
+        result = await service.get_metadata("1", fetch_url=True)
+        assert result is not None
+        assert result.actual_quality == 6
+        assert result.streaming_url == "https://cdn.example/6"
+        # The broken file was tried twice, then not again for the second
+        # request that also resolved to it.
+        assert probed == ["https://cdn.example/7", "https://cdn.example/7", "https://cdn.example/6"]
+
+    async def test_verdicts_are_remembered_across_url_refreshes(
+        self, mock_api: MockAPIClient
+    ) -> None:
+        service, probed = self._service(mock_api, broken={"https://cdn.example/7"})
+        await service.get_metadata("1", fetch_url=True)
+        probed.clear()
+        assert await service.refresh_streaming_url("1") == "https://cdn.example/6"
+        assert probed == []
+
+    async def test_no_quality_streams_means_unavailable(self, mock_api: MockAPIClient) -> None:
+        service, _ = self._service(
+            mock_api,
+            broken={"https://cdn.example/7", "https://cdn.example/6", "https://cdn.example/5"},
+        )
+        result = await service.get_metadata("1", fetch_url=True)
+        assert result is not None and not result.streaming_url
+        assert service.is_unavailable("1")
+
+    async def test_outage_is_not_remembered_as_broken_files(self, mock_api: MockAPIClient) -> None:
+        """All qualities failing is an outage: the next attempt probes afresh."""
+        broken = {"https://cdn.example/7", "https://cdn.example/6", "https://cdn.example/5"}
+        service, probed = self._service(mock_api, broken=broken)
+        await service.get_metadata("1", fetch_url=True)
+        broken.clear()
+        probed.clear()
+        service._unavailable_until.clear()  # the short unavailable window has passed
+        assert await service.refresh_streaming_url("1") == "https://cdn.example/7"
+        assert probed == ["https://cdn.example/7"]
+
+    async def test_good_stream_is_probed_once(self, mock_api: MockAPIClient) -> None:
+        service, probed = self._service(mock_api, broken=set())
+        result = await service.get_metadata("1", fetch_url=True)
+        assert result is not None and result.actual_quality == 7
+        await service.refresh_streaming_url("1")
+        assert probed == ["https://cdn.example/7"]
