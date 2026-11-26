@@ -58,8 +58,10 @@ EARLY_STOP_MARGIN_MS = 15_000
 # position is just buffering.
 END_STALL_WINDOW_MS = 2_000
 END_STALL_SECONDS = 3.0
-# A position that has reached the duration can only be the end, so wait just
-# long enough to cover the fraction of a second RelTime does not show.
+# A position that has reached the duration, on a renderer the proxy has sent
+# the end of the file to, can only be the end: wait just long enough to cover
+# the fraction of a second RelTime does not show. Without that proof of
+# delivery the renderer may be starved for audio, so END_STALL_SECONDS applies.
 END_REACHED_STALL_SECONDS = 1.0
 
 # Class-level capability cache (shared across instances)
@@ -155,6 +157,8 @@ class DLNABackend(AudioBackend):
         # Proxy keys the audio proxy failed to serve -> True if the renderer got
         # no audio at all, False if the stream was cut short.
         self._delivery_failures: dict[str, bool] = {}
+        # Proxy keys of tracks the proxy has sent through to their last byte.
+        self._delivered_keys: set[str] = set()
 
         # Device capabilities
         self._capabilities: Optional[DLNACapabilities] = None
@@ -309,7 +313,12 @@ class DLNABackend(AudioBackend):
         """
         self._proxy_server = proxy
         proxy.set_delivery_failure_callback(self._on_delivery_failure)
+        proxy.set_delivery_complete_callback(self._on_delivery_complete)
         logger.info("Audio proxy server configured for DLNA backend")
+
+    def _on_delivery_complete(self, proxy_key: str) -> None:
+        """Remember a track whose last byte the renderer has received."""
+        self._delivered_keys.add(proxy_key)
 
     def _on_delivery_failure(self, proxy_key: str, before_audio: bool) -> None:
         """Remember a track the renderer could not get (fully) from the proxy."""
@@ -455,6 +464,7 @@ class DLNABackend(AudioBackend):
             logger.debug(f"Using proxy URL: {actual_url}")
         # Failures from an earlier attempt at this URL are not this play's.
         self._delivery_failures.pop(_proxy_key(actual_url), None)
+        self._delivered_keys.discard(_proxy_key(actual_url))
 
         # Build DIDL-Lite metadata
         didl = self._build_didl(actual_url, metadata, content_type)
@@ -749,6 +759,7 @@ class DLNABackend(AudioBackend):
             )
             logger.debug(f"Gapless: registered next track proxy URL: {actual_url}")
         self._delivery_failures.pop(_proxy_key(actual_url), None)
+        self._delivered_keys.discard(_proxy_key(actual_url))
 
         # Build DIDL-Lite metadata
         didl = self._build_didl(actual_url, metadata, content_type)
@@ -979,7 +990,8 @@ class DLNABackend(AudioBackend):
 
         True once per track, after the position has been frozen within
         END_STALL_WINDOW_MS of the duration for END_STALL_SECONDS, or frozen at
-        the duration itself for END_REACHED_STALL_SECONDS.
+        the duration itself for END_REACHED_STALL_SECONDS when the proxy has
+        sent the renderer the end of the file.
         """
         if self._duration_ms <= 0 or position_ms < self._duration_ms - END_STALL_WINDOW_MS:
             self._end_stall_position_ms = None
@@ -990,9 +1002,11 @@ class DLNABackend(AudioBackend):
             self._end_stall_position_ms = position_ms
             self._end_stall_since = now
             return False
-        needed = (
-            END_REACHED_STALL_SECONDS if position_ms >= self._duration_ms else END_STALL_SECONDS
+        at_end_with_whole_file = (
+            position_ms >= self._duration_ms
+            and _proxy_key(self._current_proxy_url or "") in self._delivered_keys
         )
+        needed = END_REACHED_STALL_SECONDS if at_end_with_whole_file else END_STALL_SECONDS
         if self._end_stall_reported or now - self._end_stall_since < needed:
             return False
         self._end_stall_reported = True

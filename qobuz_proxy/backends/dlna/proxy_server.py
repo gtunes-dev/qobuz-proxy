@@ -32,6 +32,22 @@ MAX_UPSTREAM_RETRIES = 3
 UPSTREAM_RETRY_DELAY_SECONDS = 0.5
 
 
+def _reaches_end_of_file(
+    status: int, content_range: Optional[str], expected_bytes: Optional[int], bytes_sent: int
+) -> bool:
+    """Whether a completed response carried the file through to its last byte."""
+    if expected_bytes is None or bytes_sent < expected_bytes:
+        return False
+    if status != 206:
+        return True
+    # "bytes 1000-49999/50000": the range must end at the file's last byte.
+    try:
+        span, total = (content_range or "").split(" ", 1)[1].split("/", 1)
+        return int(span.split("-", 1)[1]) + 1 == int(total)
+    except (IndexError, ValueError):
+        return False
+
+
 def _parse_range_start(range_header: str) -> int:
     """Extract the start byte from a Range header ("bytes=X-...")."""
     try:
@@ -103,6 +119,7 @@ class AudioProxyServer:
 
         self._tracks: Dict[str, RegisteredTrack] = {}
         self._on_delivery_failure: Optional[Callable[[str, bool], None]] = None
+        self._on_delivery_complete: Optional[Callable[[str], None]] = None
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
@@ -194,6 +211,21 @@ class AudioProxyServer:
         response), False when the stream was cut short after audio was sent.
         """
         self._on_delivery_failure = callback
+
+    def set_delivery_complete_callback(self, callback: Callable[[str], None]) -> None:
+        """Register ``callback(proxy_key)`` for a track sent through to its last byte.
+
+        A renderer that has the end of the file cannot be waiting for more
+        audio, which lets the backend trust a position parked at the end.
+        """
+        self._on_delivery_complete = callback
+
+    def _report_delivery_complete(self, proxy_key: str) -> None:
+        if self._on_delivery_complete:
+            try:
+                self._on_delivery_complete(proxy_key)
+            except Exception as e:
+                logger.error(f"Delivery complete callback error: {e}")
 
     def _report_delivery_failure(self, proxy_key: str, before_audio: bool) -> None:
         if self._on_delivery_failure:
@@ -305,6 +337,8 @@ class AudioProxyServer:
 
         response: Optional[web.StreamResponse] = None
         expected_bytes: Optional[int] = None
+        response_status = 200
+        content_range: Optional[str] = None
         is_range = range_header is not None
         stream_start = time.monotonic()
         bytes_sent = 0
@@ -382,6 +416,8 @@ class AudioProxyServer:
                                 response_headers["Content-Range"] = upstream_response.headers[
                                     "Content-Range"
                                 ]
+                                content_range = response_headers["Content-Range"]
+                            response_status = status
 
                             logger.debug(
                                 f"Streaming track {track.track_id}, headers: {response_headers}"
@@ -419,6 +455,9 @@ class AudioProxyServer:
                     is_range=is_range,
                     completed=True,
                 )
+                if _reaches_end_of_file(response_status, content_range, expected_bytes, bytes_sent):
+                    logger.debug(f"Track {track.track_id} delivered through to its last byte")
+                    self._report_delivery_complete(proxy_key)
                 return response
 
             except asyncio.CancelledError:

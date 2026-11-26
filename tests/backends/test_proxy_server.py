@@ -1,12 +1,13 @@
 """Tests for AudioProxyServer upstream retry behavior."""
 
+import asyncio
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 from aiohttp import web
 
-from qobuz_proxy.backends.dlna.proxy_server import AudioProxyServer
+from qobuz_proxy.backends.dlna.proxy_server import AudioProxyServer, _reaches_end_of_file
 
 PAYLOAD = bytes(range(256)) * 1024  # 256 KiB deterministic payload
 ABORT_AFTER = 100_000
@@ -308,3 +309,46 @@ async def test_recovered_midstream_failure_is_not_a_delivery_failure():
         await upstream.stop()
 
     assert failures == []
+
+
+def test_reaches_end_of_file():
+    assert _reaches_end_of_file(200, None, 1000, 1000)
+    assert not _reaches_end_of_file(200, None, 1000, 400)
+    assert not _reaches_end_of_file(200, None, None, 1000)  # length unknown
+    assert _reaches_end_of_file(206, "bytes 500-999/1000", 500, 500)
+    assert not _reaches_end_of_file(206, "bytes 0-1023/50000", 1024, 1024)
+    assert not _reaches_end_of_file(206, "bytes 0-99/*", 100, 100)
+    assert not _reaches_end_of_file(206, None, 100, 100)
+
+
+async def test_reports_delivery_complete_for_a_whole_file():
+    """The backend learns when the renderer has the end of the file."""
+    upstream = ExpiredUrlUpstream()
+    base_url = await upstream.start()
+
+    port = _free_port()
+    proxy = AudioProxyServer(url_provider=MagicMock(), host="127.0.0.1", port=port)
+    delivered: list[str] = []
+    proxy.set_delivery_complete_callback(delivered.append)
+    await proxy.start()
+    try:
+        proxy.register_track("42", f"{base_url}?token=fresh", "audio/flac")
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"http://127.0.0.1:{port}/audio/42.flac") as resp:
+                assert await resp.read() == PAYLOAD
+            # The proxy reports after it has closed the response.
+            for _ in range(50):
+                if delivered:
+                    break
+                await asyncio.sleep(0.02)
+            assert delivered == ["42"]
+            # A renderer that reads the start and hangs up has not got the end.
+            delivered.clear()
+            async with session.head(f"http://127.0.0.1:{port}/audio/42.flac"):
+                pass
+    finally:
+        await proxy.stop()
+        await upstream.stop()
+
+    assert delivered == []

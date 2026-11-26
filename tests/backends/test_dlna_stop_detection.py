@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from qobuz_proxy.backends.dlna.backend import (
+    _proxy_key,
     NEAR_END_POLL_INTERVAL_SECONDS,
     STATE_POLL_INTERVAL_SECONDS,
     DLNABackend,
 )
 from qobuz_proxy.backends.dlna.client import DLNAClient
-from qobuz_proxy.backends.types import PlaybackState
+from qobuz_proxy.backends.types import BackendTrackMetadata, PlaybackState
 
 QOBUZ_URI = "http://proxy:7120/audio/123.flac"
 
@@ -216,13 +217,38 @@ class TestStalledAtTrackEnd:
         backend._client.stop.assert_awaited_once()
 
     async def test_position_at_duration_ends_after_one_second(self, backend, monkeypatch, clock):
-        """Nothing is left to play, so don't sit through the longer wait."""
+        """The renderer has the whole file and nothing is left to play, so
+        don't sit through the longer wait."""
+        backend._on_delivery_complete(_proxy_key(QOBUZ_URI))
         backend._client.get_transport_info.return_value = "PLAYING"
         backend._client.get_position_info.return_value = 200_000
         await self.poll_seconds(backend, monkeypatch, clock, 1)  # first sighting
         backend.ended.assert_not_called()
         await self.poll_seconds(backend, monkeypatch, clock, 1)  # the next poll
         backend.ended.assert_called_once()
+
+    async def test_position_at_duration_without_the_whole_file_waits_longer(
+        self, backend, monkeypatch, clock
+    ):
+        """The proxy has not sent the end of the file, so the renderer may be
+        waiting for audio and not finished."""
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 200_000
+        await self.poll_seconds(backend, monkeypatch, clock, 2)
+        backend.ended.assert_not_called()
+        await self.poll_seconds(backend, monkeypatch, clock, 2)
+        backend.ended.assert_called_once()
+
+    async def test_delivery_of_an_earlier_play_does_not_count(self, backend):
+        """Playing a URL again forgets that it was delivered before."""
+        backend._on_delivery_complete(_proxy_key(QOBUZ_URI))
+        backend._client.set_av_transport_uri.return_value = True
+        backend._client.play.return_value = True
+        metadata = BackendTrackMetadata(
+            track_id="123", title="T", artist="A", album="B", duration_ms=200_000
+        )
+        await backend.play(QOBUZ_URI, metadata)
+        assert _proxy_key(QOBUZ_URI) not in backend._delivered_keys
 
     async def test_position_just_short_of_duration_waits_longer(self, backend, monkeypatch, clock):
         """RelTime may stop a second short of the duration the proxy knows."""
