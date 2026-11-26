@@ -51,6 +51,17 @@ PLAYBACK_START_GRACE_PERIOD_SECONDS = 5.0
 # interval plus renderers whose reported position lags a little.
 EARLY_STOP_MARGIN_MS = 15_000
 
+# Some renderers (FiiO K17) never report STOPPED when a track ends: they stay
+# in PLAYING with the position parked at the track's duration. A position
+# frozen this close to the end for this long counts as the track end. The
+# window allows for RelTime's one-second resolution; mid-track a frozen
+# position is just buffering.
+END_STALL_WINDOW_MS = 2_000
+END_STALL_SECONDS = 3.0
+# A position that has reached the duration can only be the end, so wait just
+# long enough to cover the fraction of a second RelTime does not show.
+END_REACHED_STALL_SECONDS = 1.0
+
 # Class-level capability cache (shared across instances)
 _capability_cache = CapabilityCache()
 
@@ -133,6 +144,11 @@ class DLNABackend(AudioBackend):
         # LOADING). Many renderers pass through TRANSITIONING at the end of a
         # track, so a STOPPED that follows must still count as a track end.
         self._loading_after_playing = False
+        # Position frozen near the end of the track, and since when (see
+        # END_STALL_SECONDS). Reported once per track.
+        self._end_stall_position_ms: Optional[int] = None
+        self._end_stall_since: float = 0.0
+        self._end_stall_reported = False
 
         # Audio proxy server for URL handling
         self._proxy_server: Optional["AudioProxyServer"] = None
@@ -926,6 +942,24 @@ class DLNABackend(AudioBackend):
                     pos = await self.get_position()
                     self._notify_position_update(pos)
 
+                    if not in_grace_period and self._stalled_at_track_end(pos):
+                        logger.info(
+                            "[%s] Renderer still reports PLAYING but has sat at %s of %s "
+                            "for %.1fs; treating it as the track end",
+                            self.name,
+                            _format_ms(pos),
+                            _format_ms(self._duration_ms),
+                            time.monotonic() - self._end_stall_since,
+                        )
+                        self._next_track_proxy_url = None
+                        self._next_track_metadata = None
+                        # Leave the renderer stopped, as after a normal track
+                        # end, in case nothing follows this track.
+                        if self._client:
+                            await self._client.stop()
+                        self._state = PlaybackState.STOPPED
+                        self._notify_track_ended()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -939,6 +973,30 @@ class DLNABackend(AudioBackend):
             and self._duration_ms - self._furthest_position_ms <= NEAR_END_WINDOW_MS
         )
         return NEAR_END_POLL_INTERVAL_SECONDS if near_end else STATE_POLL_INTERVAL_SECONDS
+
+    def _stalled_at_track_end(self, position_ms: int) -> bool:
+        """Whether a PLAYING renderer has finished the track without saying so.
+
+        True once per track, after the position has been frozen within
+        END_STALL_WINDOW_MS of the duration for END_STALL_SECONDS, or frozen at
+        the duration itself for END_REACHED_STALL_SECONDS.
+        """
+        if self._duration_ms <= 0 or position_ms < self._duration_ms - END_STALL_WINDOW_MS:
+            self._end_stall_position_ms = None
+            self._end_stall_reported = False
+            return False
+        now = time.monotonic()
+        if position_ms != self._end_stall_position_ms:
+            self._end_stall_position_ms = position_ms
+            self._end_stall_since = now
+            return False
+        needed = (
+            END_REACHED_STALL_SECONDS if position_ms >= self._duration_ms else END_STALL_SECONDS
+        )
+        if self._end_stall_reported or now - self._end_stall_since < needed:
+            return False
+        self._end_stall_reported = True
+        return True
 
     def _stopped_before_track_end(self) -> bool:
         """Whether a stop landed well before the end of a track that streamed fine.

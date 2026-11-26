@@ -180,3 +180,89 @@ async def test_gapless_move_seen_after_transitioning_records_playing(backend, mo
     await poll(backend, monkeypatch)
     assert backend._state == PlaybackState.PLAYING
     assert backend._current_proxy_url == next_uri
+
+
+class TestStalledAtTrackEnd:
+    """Some renderers (FiiO K17) never report STOPPED when a track ends: they
+    stay in PLAYING with the position parked at the track's duration."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr("qobuz_proxy.backends.dlna.backend.time.monotonic", lambda: now[0])
+        return now
+
+    async def poll_seconds(self, backend, monkeypatch, clock, seconds: int) -> None:
+        """Poll once per simulated second."""
+        backend._is_connected = True
+        ticks = 0
+
+        async def tick(_):
+            nonlocal ticks
+            ticks += 1
+            clock[0] += 1.0
+            if ticks > seconds:
+                backend._is_connected = False
+
+        monkeypatch.setattr("qobuz_proxy.backends.dlna.backend.asyncio.sleep", tick)
+        await backend._poll_state_loop()
+
+    async def test_position_parked_at_duration_is_a_track_end(self, backend, monkeypatch, clock):
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 200_000
+        await self.poll_seconds(backend, monkeypatch, clock, 10)
+        backend.ended.assert_called_once()
+        backend.interrupted.assert_not_called()
+        backend._client.stop.assert_awaited_once()
+
+    async def test_position_at_duration_ends_after_one_second(self, backend, monkeypatch, clock):
+        """Nothing is left to play, so don't sit through the longer wait."""
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 200_000
+        await self.poll_seconds(backend, monkeypatch, clock, 1)  # first sighting
+        backend.ended.assert_not_called()
+        await self.poll_seconds(backend, monkeypatch, clock, 1)  # the next poll
+        backend.ended.assert_called_once()
+
+    async def test_position_just_short_of_duration_waits_longer(self, backend, monkeypatch, clock):
+        """RelTime may stop a second short of the duration the proxy knows."""
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 199_000
+        await self.poll_seconds(backend, monkeypatch, clock, 2)
+        backend.ended.assert_not_called()
+        await self.poll_seconds(backend, monkeypatch, clock, 2)
+        backend.ended.assert_called_once()
+
+    async def test_stall_mid_track_is_not_a_track_end(self, backend, monkeypatch, clock):
+        """A renderer that is buffering also reports a frozen position."""
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 100_000
+        await self.poll_seconds(backend, monkeypatch, clock, 10)
+        backend.ended.assert_not_called()
+
+    async def test_advancing_position_near_the_end_is_not_a_track_end(
+        self, backend, monkeypatch, clock
+    ):
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.side_effect = [198_000, 198_500, 199_000, 199_500]
+        await self.poll_seconds(backend, monkeypatch, clock, 3)
+        backend.ended.assert_not_called()
+
+    async def test_unknown_duration_never_counts_as_stalled(self, backend, monkeypatch, clock):
+        backend._duration_ms = 0
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 0
+        await self.poll_seconds(backend, monkeypatch, clock, 10)
+        backend.ended.assert_not_called()
+
+    async def test_next_track_can_end_the_same_way(self, backend, monkeypatch, clock):
+        backend._client.get_transport_info.return_value = "PLAYING"
+        backend._client.get_position_info.return_value = 200_000
+        await self.poll_seconds(backend, monkeypatch, clock, 10)
+        # The next track starts: position drops back, then parks at the end again.
+        backend._state = PlaybackState.PLAYING
+        backend._client.get_position_info.return_value = 1_000
+        await self.poll_seconds(backend, monkeypatch, clock, 2)
+        backend._client.get_position_info.return_value = 200_000
+        await self.poll_seconds(backend, monkeypatch, clock, 10)
+        assert backend.ended.call_count == 2
